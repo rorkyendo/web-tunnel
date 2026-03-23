@@ -4,30 +4,38 @@ Tunneling aplikasi lokal kamu menjadi online seperti ngrok dan 1000% gratis deng
 
 ## Cara Jalanin EXE (Windows)
 
-1. Pastikan app lokal kamu sudah jalan dulu, misalnya di port `3000`.
-2. Jalankan tunnel (dari folder tempat file EXE berada):
+1. Pastikan aplikasi lokal kamu sudah jalan dulu.
+2. Jalankan `medtunnel.exe` dari folder file EXE.
+
+Contoh paling sederhana (tanpa subdomain):
 
 ```powershell
 .\medtunnel.exe 3000
 ```
 
-Kalau mau request subdomain juga:
+Contoh dengan subdomain:
 
 ```powershell
 .\medtunnel.exe 3000 namakamu
 ```
 
-Kalau server pakai token auth, jalankan:
+Contoh dengan token:
 
 ```powershell
 .\medtunnel.exe 3000 namakamu TOKEN_RAHASIA
 ```
 
-Atau via environment variable:
+Contoh dengan token via environment variable:
 
 ```powershell
 $env:MTUNNEL_TOKEN="TOKEN_RAHASIA"
 .\medtunnel.exe 3000 namakamu
+```
+
+Contoh untuk aplikasi lokal di Apache/Laragon port 80:
+
+```powershell
+.\medtunnel.exe 80 familyhill
 ```
 
 ## Arti Parameter
@@ -35,21 +43,24 @@ $env:MTUNNEL_TOKEN="TOKEN_RAHASIA"
 - Argumen pertama: port lokal (wajib), contoh `3000`
 - Argumen kedua: subdomain (opsional), contoh `namakamu`
 - Argumen ketiga: token (opsional), contoh `TOKEN_RAHASIA`
+- Argumen keempat: upstream host lokal (opsional), default `localhost`
 
-## Konfigurasi Server Tunnel
+## Opsi Environment Variable (Client EXE)
 
-`server.js` mendukung environment variable berikut:
+- `MTUNNEL_TOKEN`: token auth (opsional)
+- `MTUNNEL_UPSTREAM_HOST`: host upstream lokal (default `localhost`)
+- `MTUNNEL_UPSTREAM_HOST_HEADER`: paksa header Host ke nilai tertentu
+- `MTUNNEL_READ_TIMEOUT_SEC`: timeout baca koneksi websocket (default `300`)
+- `MTUNNEL_RECONNECT_BASE_SEC`: jeda reconnect awal (default `2`)
+- `MTUNNEL_RECONNECT_MAX_SEC`: jeda reconnect maksimum (default `30`)
+- `MTUNNEL_DEBUG`: set `1` untuk log debug request proxy
 
-- `TUNNEL_DOMAIN` (default: `medandigital.dev`)
-- `MTUNNEL_AUTH_TOKEN` (default: kosong / tanpa auth)
-- `TUNNEL_REQUEST_TIMEOUT_MS` (default: `25000`)
-
-Contoh run server dengan token:
+Contoh untuk virtual host lokal:
 
 ```powershell
-$env:TUNNEL_DOMAIN="medandigital.dev"
-$env:MTUNNEL_AUTH_TOKEN="TOKEN_RAHASIA"
-node server.js
+$env:MTUNNEL_UPSTREAM_HOST="127.0.0.1"
+$env:MTUNNEL_UPSTREAM_HOST_HEADER="familyhill.medandigital.dev"
+.\medtunnel.exe 80 familyhill TOKEN_RAHASIA
 ```
 
 ## Kalau Berhasil
@@ -57,9 +68,8 @@ node server.js
 Nanti biasanya muncul log seperti ini:
 
 ```text
-Connected to server
-Tunnel Active!
-Public URL: <url-dari-server>
+Connected
+🚀 URL: https://subdomain.medandigital.dev
 ```
 
-Kalau URL public sudah keluar, tinggal akses URL itu dari browser.
+Kalau URL public sudah keluar, tunnel sudah aktif dan bisa langsung diakses dari browser.

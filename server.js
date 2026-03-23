@@ -10,6 +10,7 @@ const wss = new WebSocket.Server({ server });
 const ROOT_DOMAIN = process.env.TUNNEL_DOMAIN || "medandigital.dev";
 const AUTH_TOKEN = process.env.MTUNNEL_AUTH_TOKEN || "";
 const REQUEST_TIMEOUT_MS = Number(process.env.TUNNEL_REQUEST_TIMEOUT_MS || 25000);
+const DEBUG = process.env.MTUNNEL_SERVER_DEBUG === "1";
 
 const tunnels = {};
 const pending = {};
@@ -139,6 +140,10 @@ app.use((req, res) => {
   const host = req.headers.host || "";
   const sub = host.split(".")[0];
   const client = tunnels[sub];
+
+  if (DEBUG || req.url === "/404.html") {
+    console.log("[relay]", req.method, req.url, "host=", host, "sub=", sub, "hasClient=", !!client);
+  }
 
   if (!client) return res.status(404).send("Tunnel not found");
 
