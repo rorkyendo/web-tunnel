@@ -47,7 +47,7 @@ func main() {
 	targetURL := "http://" + upstreamHost + ":" + port
 	wsURL := os.Getenv("MTUNNEL_SERVER")
 	if wsURL == "" {
-		wsURL = "wss://connect.medandigital.dev"
+		wsURL = "ws://163.223.104.100:3000"
 	}
 
 	readTimeout := 300 * time.Second
