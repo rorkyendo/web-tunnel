@@ -47,6 +47,7 @@ Contoh untuk aplikasi lokal di Apache/Laragon port 80:
 
 ## Opsi Environment Variable (Client EXE)
 
+- `MTUNNEL_SERVER`: URL websocket server tunnel (default `wss://connect.medandigital.dev`)
 - `MTUNNEL_TOKEN`: token auth (opsional)
 - `MTUNNEL_UPSTREAM_HOST`: host upstream lokal (default `localhost`)
 - `MTUNNEL_UPSTREAM_HOST_HEADER`: paksa header Host ke nilai tertentu
