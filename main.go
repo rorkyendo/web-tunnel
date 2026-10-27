@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,30 +21,85 @@ import (
 
 type Message map[string]interface{}
 
+var ErrUnauthorized = errors.New("unauthorized token")
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: mtunnel <port> [subdomain] [token] [upstream-host]")
+		printUsage()
 		return
 	}
 
+	if strings.EqualFold(os.Args[1], "tcp") {
+		runTCPMode()
+		return
+	}
+
+	runHTTPMode()
+}
+
+func printUsage() {
+	fmt.Println("Usage (HTTP): mtunnel <port> [subdomain] [token] [upstream-host]")
+	fmt.Println("Usage (TCP):  mtunnel tcp <local-port> [remote-port] [token] [upstream-host]")
+}
+
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func argOrEnv(args []string, idx int, envName, def string) string {
+	if len(os.Args) > idx && os.Args[idx] != "" {
+		return os.Args[idx]
+	}
+	if v := os.Getenv(envName); v != "" {
+		return v
+	}
+	return def
+}
+
+func reconnectDelay(attempt int, base, max time.Duration) time.Duration {
+	delay := base
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+		if delay >= max {
+			return max
+		}
+	}
+	return delay
+}
+
+func dialWS(wsURL string, readTimeout time.Duration) (*websocket.Conn, error) {
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return nil
+	})
+	conn.SetPingHandler(func(appData string) error {
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+	})
+	return conn, nil
+}
+
+// ===================== HTTP MODE =====================
+
+func runHTTPMode() {
 	port := os.Args[1]
 	subdomain := ""
 	if len(os.Args) > 2 {
 		subdomain = os.Args[2]
 	}
 
-	token := os.Getenv("MTUNNEL_TOKEN")
-	if len(os.Args) > 3 {
-		token = os.Args[3]
-	}
-
-	upstreamHost := os.Getenv("MTUNNEL_UPSTREAM_HOST")
-	if upstreamHost == "" {
-		upstreamHost = "localhost"
-	}
-	if len(os.Args) > 4 {
-		upstreamHost = os.Args[4]
-	}
+	token := argOrEnv(os.Args, 3, "MTUNNEL_TOKEN", "")
+	upstreamHost := argOrEnv(os.Args, 4, "MTUNNEL_UPSTREAM_HOST", "localhost")
 
 	targetURL := "http://" + upstreamHost + ":" + port
 	wsURL := os.Getenv("MTUNNEL_SERVER")
@@ -50,26 +107,9 @@ func main() {
 		wsURL = "ws://163.223.104.100:3000"
 	}
 
-	readTimeout := 300 * time.Second
-	if timeoutSec := os.Getenv("MTUNNEL_READ_TIMEOUT_SEC"); timeoutSec != "" {
-		if n, err := strconv.Atoi(timeoutSec); err == nil && n > 0 {
-			readTimeout = time.Duration(n) * time.Second
-		}
-	}
-
-	reconnectBase := 2 * time.Second
-	if baseSec := os.Getenv("MTUNNEL_RECONNECT_BASE_SEC"); baseSec != "" {
-		if n, err := strconv.Atoi(baseSec); err == nil && n > 0 {
-			reconnectBase = time.Duration(n) * time.Second
-		}
-	}
-
-	reconnectMax := 30 * time.Second
-	if maxSec := os.Getenv("MTUNNEL_RECONNECT_MAX_SEC"); maxSec != "" {
-		if n, err := strconv.Atoi(maxSec); err == nil && n > 0 {
-			reconnectMax = time.Duration(n) * time.Second
-		}
-	}
+	readTimeout := time.Duration(envInt("MTUNNEL_READ_TIMEOUT_SEC", 300)) * time.Second
+	reconnectBase := time.Duration(envInt("MTUNNEL_RECONNECT_BASE_SEC", 2)) * time.Second
+	reconnectMax := time.Duration(envInt("MTUNNEL_RECONNECT_MAX_SEC", 30)) * time.Second
 
 	attempt := 0
 
@@ -83,39 +123,19 @@ func main() {
 			}
 		}
 
-		delay := reconnectBase
-		for i := 0; i < attempt; i++ {
-			delay *= 2
-			if delay >= reconnectMax {
-				delay = reconnectMax
-				break
-			}
-		}
-
+		delay := reconnectDelay(attempt, reconnectBase, reconnectMax)
 		fmt.Println("🔁 Reconnecting in", delay)
 		time.Sleep(delay)
 		attempt++
 	}
 }
 
-var ErrUnauthorized = errors.New("unauthorized token")
-
 func runSession(wsURL, targetURL, subdomain, token string, readTimeout time.Duration) error {
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, err := dialWS(wsURL, readTimeout)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-
-	conn.SetReadDeadline(time.Now().Add(readTimeout))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(readTimeout))
-		return nil
-	})
-	conn.SetPingHandler(func(appData string) error {
-		conn.SetReadDeadline(time.Now().Add(readTimeout))
-		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
-	})
 
 	writeChan := make(chan Message, 200)
 	done := make(chan struct{})
@@ -123,10 +143,11 @@ func runSession(wsURL, targetURL, subdomain, token string, readTimeout time.Dura
 	go writer(conn, writeChan, done, writerErr)
 	defer close(done)
 
-	fmt.Println("Connected (mtunnel v0.5)")
+	fmt.Println("Connected (mtunnel v0.6)")
 
 	if !enqueue(writeChan, done, Message{
 		"type":      "register",
+		"proto":     "http",
 		"subdomain": subdomain,
 		"token":     token,
 	}) {
@@ -174,21 +195,6 @@ func runSession(wsURL, targetURL, subdomain, token string, readTimeout time.Dura
 		}
 
 		go handleRequest(msg, targetURL, writeChan, done)
-	}
-}
-
-func writer(conn *websocket.Conn, writeChan <-chan Message, done <-chan struct{}, writerErr chan<- error) {
-	for {
-		select {
-		case <-done:
-			return
-		case msg := <-writeChan:
-			err := conn.WriteJSON(msg)
-			if err != nil {
-				writerErr <- err
-				return
-			}
-		}
 	}
 }
 
@@ -287,6 +293,208 @@ func handleRequest(msg Message, target string, writeChan chan<- Message, done <-
 	})
 }
 
+// ===================== TCP MODE =====================
+
+func runTCPMode() {
+	if len(os.Args) < 3 {
+		printUsage()
+		return
+	}
+
+	localPort := os.Args[2]
+
+	remotePort := envInt("MTUNNEL_REMOTE_PORT", 0)
+	if len(os.Args) > 3 {
+		if n, err := strconv.Atoi(os.Args[3]); err == nil && n > 0 {
+			remotePort = n
+		}
+	}
+
+	token := argOrEnv(os.Args, 4, "MTUNNEL_TOKEN", "")
+	upstreamHost := argOrEnv(os.Args, 5, "MTUNNEL_UPSTREAM_HOST", "localhost")
+	target := net.JoinHostPort(upstreamHost, localPort)
+
+	wsURL := os.Getenv("MTUNNEL_SERVER")
+	if wsURL == "" {
+		wsURL = "ws://163.223.104.100:3000"
+	}
+
+	readTimeout := time.Duration(envInt("MTUNNEL_READ_TIMEOUT_SEC", 300)) * time.Second
+	reconnectBase := time.Duration(envInt("MTUNNEL_RECONNECT_BASE_SEC", 2)) * time.Second
+	reconnectMax := time.Duration(envInt("MTUNNEL_RECONNECT_MAX_SEC", 30)) * time.Second
+
+	attempt := 0
+
+	for {
+		err := runTCPSession(wsURL, target, token, remotePort, readTimeout)
+		if err != nil {
+			fmt.Println("⚠️ Disconnected:", err)
+			if errors.Is(err, ErrUnauthorized) {
+				fmt.Println("❌ Stopped reconnect: unauthorized token")
+				return
+			}
+		}
+
+		delay := reconnectDelay(attempt, reconnectBase, reconnectMax)
+		fmt.Println("🔁 Reconnecting in", delay)
+		time.Sleep(delay)
+		attempt++
+	}
+}
+
+func runTCPSession(wsURL, target, token string, remotePort int, readTimeout time.Duration) error {
+	conn, err := dialWS(wsURL, readTimeout)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	writeChan := make(chan Message, 200)
+	done := make(chan struct{})
+	writerErr := make(chan error, 1)
+	go writer(conn, writeChan, done, writerErr)
+	defer close(done)
+
+	fmt.Println("Connected (mtunnel v0.6 tcp)")
+
+	if !enqueue(writeChan, done, Message{
+		"type":        "register",
+		"proto":       "tcp",
+		"token":       token,
+		"remote_port": remotePort,
+	}) {
+		return errors.New("failed to register tunnel")
+	}
+
+	var mu sync.Mutex
+	localConns := map[string]net.Conn{}
+
+	removeConn := func(connID string) net.Conn {
+		mu.Lock()
+		defer mu.Unlock()
+		c := localConns[connID]
+		delete(localConns, connID)
+		return c
+	}
+
+	defer func() {
+		mu.Lock()
+		for _, c := range localConns {
+			c.Close()
+		}
+		localConns = map[string]net.Conn{}
+		mu.Unlock()
+	}()
+
+	for {
+		select {
+		case err := <-writerErr:
+			return err
+		default:
+		}
+
+		var msg Message
+		err := conn.ReadJSON(&msg)
+		if err != nil {
+			return err
+		}
+
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+
+		msgType, _ := msg["type"].(string)
+		connID, _ := msg["conn_id"].(string)
+
+		switch msgType {
+		case "assigned":
+			fmt.Println("🚀 TCP URL:", msg["url"])
+			fmt.Println("   Forwarding to", target)
+		case "error":
+			message, _ := msg["message"].(string)
+			fmt.Println("❌ Server error:", message)
+			if strings.Contains(strings.ToLower(message), "unauthorized") {
+				return ErrUnauthorized
+			}
+			return errors.New(message)
+		case "ping":
+			enqueue(writeChan, done, Message{"type": "pong"})
+		case "tcp-open":
+			if connID == "" {
+				continue
+			}
+			local, err := net.DialTimeout("tcp", target, 10*time.Second)
+			if err != nil {
+				fmt.Println("⚠️ Local dial failed:", err)
+				enqueue(writeChan, done, Message{"type": "tcp-close", "conn_id": connID})
+				continue
+			}
+			mu.Lock()
+			localConns[connID] = local
+			mu.Unlock()
+			go pumpTCP(local, connID, writeChan, done, removeConn)
+		case "tcp-data":
+			encoded, _ := msg["data"].(string)
+			mu.Lock()
+			local := localConns[connID]
+			mu.Unlock()
+			if local == nil {
+				continue
+			}
+			chunk, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				continue
+			}
+			if _, err := local.Write(chunk); err != nil {
+				removeConn(connID)
+				local.Close()
+				enqueue(writeChan, done, Message{"type": "tcp-close", "conn_id": connID})
+			}
+		case "tcp-close":
+			if local := removeConn(connID); local != nil {
+				local.Close()
+			}
+		}
+	}
+}
+
+func pumpTCP(local net.Conn, connID string, writeChan chan<- Message, done <-chan struct{}, removeConn func(string) net.Conn) {
+	buf := make([]byte, 16*1024)
+	for {
+		n, err := local.Read(buf)
+		if n > 0 {
+			if !enqueue(writeChan, done, Message{
+				"type":    "tcp-data",
+				"conn_id": connID,
+				"data":    base64.StdEncoding.EncodeToString(buf[:n]),
+			}) {
+				return
+			}
+		}
+		if err != nil {
+			removeConn(connID)
+			local.Close()
+			enqueue(writeChan, done, Message{"type": "tcp-close", "conn_id": connID})
+			return
+		}
+	}
+}
+
+// ===================== SHARED =====================
+
+func writer(conn *websocket.Conn, writeChan <-chan Message, done <-chan struct{}, writerErr chan<- error) {
+	for {
+		select {
+		case <-done:
+			return
+		case msg := <-writeChan:
+			err := conn.WriteJSON(msg)
+			if err != nil {
+				writerErr <- err
+				return
+			}
+		}
+	}
+}
+
 func enqueue(writeChan chan<- Message, done <-chan struct{}, msg Message) bool {
 	select {
 	case <-done:
@@ -304,7 +512,7 @@ type recorder struct {
 
 func newRecorder() *recorder {
 	return &recorder{
-		header: make(http.Header),
+		header: make(map[string][]string),
 		status: 200,
 	}
 }
